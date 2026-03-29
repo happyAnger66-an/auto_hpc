@@ -78,7 +78,15 @@
 - **Pad**：将 `M, N, K` 向上取整到 `BM, BN, BK` 的倍数，简化 kernel（无需 tile 内复杂边界谓词）。**无效 pad 区**不参与与 `torch` 的数值对比（只校验 `y[:M,:N]`）。
 - **GFLOPS 报告**：计时在 **pad 后** 张量上执行，但 FLOPs 仍按 **用户输入的原始 M,N,K** 计算，以便与 `compare.py` 中 cuBLAS/cuDNN **同一算术量口径**对齐（pad 会带来少量「白算」，大问题上通常可忽略）。
 
-### 3.5 重要踩坑：`@cute.kernel` / `@cute.jit` 与闭包
+### 3.5 双缓冲 smem（`--pipeline double`，软件多阶段）
+
+`sA` / `sB` 升级为 **`(2, 64, 16)`** 与 **`(2, 16, 64)`** 静态 layout：槽 `0/1` 交替装相邻 K 条带。启动时 **Prologue** 只装 `k_tile=0` 到槽 `0`；主循环内若存在下一条带，则先向槽 `1 - (kn mod 2)` 做与单缓冲相同的 `local_tile` + `composition` + `cute.copy`，`sync` 后再用 `sA[kn mod 2, …]`、`sB[kn mod 2, …]` 做子块乘加。
+
+当前仍使用 **`CopyUniversalOp` 同步拷贝**，因此 **不会** 重叠 GMEM 与 MMA；**双倍 smem** 往往 **降低 block 占用率**，实测 GFLOPS 常 **显著低于** `--pipeline single`（栅栏已按「仅在有预取/尚有下一轮」插入，略减多余 `sync`，仍难抵消占用率损失）。要真正缩短墙钟时间，需在预取路径上改用 **`cp.async`**（非 bulk 时需满足指针对齐；对 `mark_layout_dynamic` 的 `[M,K]` 试 **128b** `CopyG2SOp` 会因 gmem 对齐校验失败）或 Hopper+ **TMA**，并保持与双槽布局一致的 `commit`/`wait_group` 顺序。
+
+**`--pipeline double_cpasync32`（4070 / sm_89）**：曾尝试用 `cutlass.cute.nvgpu.cpasync.CopyG2SOp` + `num_bits_per_copy=32` 对 `composition(local_tile, (256,4))` 得到的 rank-1 视图做 **gmem→smem** 预取：IR 可过，但 **GEMM 结果与 PyTorch 大面积不一致**；若改为按标量切片子视图，则 `slice_` 与布局 **weakly congruent** 报错。故 CLI 仍保留该选项，但 **当前与 `double` 共用同一 JIT 入口**，避免维护两份等价同步实现；待 CuTeDSL 修复或改用显式指针/PTX 后再接入真 `cp.async`。
+
+### 3.6 重要踩坑：`@cute.kernel` / `@cute.jit` 与闭包
 
 **现象**：`cute.compile(linear_entry_tiled, …)` 报错类似  
 `requires a code object with 0 free vars, not N`。
@@ -107,6 +115,8 @@
 | 用途 | 命令 / 位置 |
 |------|-------------|
 | 默认 tiled 基准 | `python3 linear/cutedsl/benchmark_linear.py --m M --n N --k K` |
+| 双缓冲 tiled | `… --pipeline double`（`--kernel tiled` 时有效） |
+| `double_cpasync32` 占位 | `… --pipeline double_cpasync32`（当前等同 `double`，见 §3.5） |
 | 对照 naive | `… --kernel naive` |
 | 机器可读一行（给 compare） | `--machine` |
 | Hello | `linear/cutedsl/hello_cutedsl_linear.py`（tiled + pad） |
@@ -118,7 +128,7 @@
 
 按投入与收益大致排序，供后续迭代：
 
-1. **双缓冲 / 多 stage smem**：重叠全局读与计算（需更仔细的同步与流水线）。
+1. ~~**双缓冲 / 多 stage smem**~~：**软件双槽 + 预取/计算阶段** 已由 `--pipeline double` 提供（§3.5）；**异步重叠** 仍待 `cp.async`/TMA 与对齐/描述符。
 2. ~~**向量化全局加载**~~：**已实现** 为每线程 4×fp32 的 `cute.copy` 路径（见 §3.3）；若仍要 TMA/`cp.async`/显式 128-bit，可再迭代。
 3. **更大 BK 或调整 BM/BN**：在 smem 容量与寄存器压力下扫参。
 4. **架构专用路径**：Hopper+ 使用 TMA + WGMMA 等（直接对照 `cutlass` 官方示例）。
@@ -130,7 +140,7 @@
 | 阶段 | 要点 |
 |------|------|
 | Naive | 正确、易读；每点一线程 + 全长 K 循环，性能差。 |
-| Tiled | `Wt` 布局 + CTA smem tile + 线程子 tile + `sync_threads`；注意 **JIT 内用字面量避免闭包**。 |
+| Tiled | `Wt` 布局 + CTA smem tile + 线程子 tile + `sync_threads`；可选 `--pipeline double` 双槽 smem + 软件预取阶段。 |
 | 指标 | Pad 执行、原始 MNK 计 FLOPs，与 compare 其它列一致。 |
 
 若本文与实现漂移，以 `linear/cutedsl/benchmark_linear.py` 与 `linear/cutedsl/README.md` 为准，并建议在本文件末尾 **更新日期** 或补一节变更记录。

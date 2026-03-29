@@ -1,3 +1,4 @@
 CuTeDSL/__pycache__
 __pycache__/
 */build/
+element-wise/cublas/build/CMakeCache.txt element-wise/cublas/build/CMakeFiles element-wise/cublas/build/cmake_install.cmake element-wise/cublas/build/elementwise_add_bench element-wise/cublas/build/Makefile element-wise/cudnn/build/CMakeCache.txt element-wise/cudnn/build/CMakeFiles element-wise/cudnn/build/cmake_install.cmake element-wise/cudnn/build/elementwise_add_bench element-wise/cudnn/build/Makefile linear/cublas/build/CMakeCache.txt linear/cublas/build/CMakeFiles linear/cublas/build/cmake_install.cmake linear/cublas/build/linear_bench linear/cublas/build/Makefile linear/cudnn/build/CMakeCache.txt linear/cudnn/build/CMakeFiles linear/cudnn/build/cmake_install.cmake linear/cudnn/build/linear_bench linear/cudnn/build/Makefile

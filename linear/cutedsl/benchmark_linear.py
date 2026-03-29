@@ -10,6 +10,8 @@ CuTeDSL 基准：Linear Y = X @ W^T + b（FP32）。
 
 可选 ``--kernel naive``：每输出一线程 + 全 K 循环（仅作对照）。
 
+可选 ``--pipeline double``：双槽 + 同步 ``CopyUniversalOp``（见 ``linear_tiled_kernel_double_buffer``），占用率常更差。**``double_cpasync32``**：双槽布局与 ``double`` 相同；预取目前用 **同步** ``CopyUniversalOp``（见 kernel 内说明）。在已安装的 CuTeDSL 上 ``cute.copy(CopyG2SOp, …)`` 与 ``composition(local_tile, (256,4))`` 的 rank-1 视图结合后 **数值与参考不一致**，按 float 的 ``slice_`` 亦无法通过 layout congruence，故真正的 32b ``cp.async`` 预取暂不能接。
+
 算术量（与 cuBLAS/cuDNN 一致）：
   FLOPs = 2*M*N*K + M*N，GFLOPS = FLOPs / time_s / 1e9
   （计时在 pad 后的张量上；报告 GFLOPS 仍按**原始** M,N,K 计 FLOPs，便于与 compare 其它列对齐）
@@ -138,6 +140,106 @@ def linear_tiled_kernel(
 
 
 @cute.kernel
+def linear_tiled_kernel_double_buffer(
+    mY: cute.Tensor,
+    mX: cute.Tensor,
+    mWt: cute.Tensor,
+    mB: cute.Tensor,
+):
+    """
+    与 ``linear_tiled_kernel`` 相同的 GEMM 与向量化 GMEM→SMEM 拷贝，但使用 **双份 smem**：
+    奇偶 K 块交替写入 ``sA[0]`` / ``sA[1]``（``sB`` 同理）。Prologue 装入第 0 条 K；
+    每个 ``k_tile`` 上先预取下一条（若存在）到「写缓冲」，再对「读缓冲」做 MMA 子块累加。
+    在同步 ``CopyUniversalOp`` 下无法真正重叠 GMEM 与计算；**双倍 smem** 往往降低占用率，整体常 **慢于** ``linear_tiled_kernel``。栅栏仅在有协作预取/尚有下一轮时插入，以略减多余 ``sync``。
+
+    ``--pipeline double_cpasync32`` 当前 **与此 kernel 相同**（入口复用）：已尝试
+    ``CopyG2SOp``+``num_bits_per_copy=32`` 直连 smem，编译通过但数值错误；按 float 切分视图则
+    ``slice_`` 与 rank-1 构图不 weakly congruent。真 4070 / sm_89 上 32b ``cp.async`` 需等 DSL 修复或手写 PTX/cu 辅助。
+    """
+    tidx, _, _ = cute.arch.thread_idx()
+    bidx, bidy, _ = cute.arch.block_idx()
+
+    dtype = mY.element_type
+    zero = dtype(0.0)
+
+    bm = bidx * 64
+    bn = bidy * 64
+    kdim = cute.size(mX, mode=[1])
+
+    smem = utils.SmemAllocator()
+    lay_a2 = cute.make_layout((2, 64, 16))
+    lay_b2 = cute.make_layout((2, 16, 64))
+    sA = smem.allocate_tensor(dtype, lay_a2, byte_alignment=4)
+    sB = smem.allocate_tensor(dtype, lay_b2, byte_alignment=4)
+
+    ti = tidx // 16
+    tj = tidx % 16
+
+    frag = cute.make_rmem_tensor((4, 4), dtype)
+    for ii in range(4):
+        for jj in range(4):
+            frag[ii, jj] = zero
+
+    copy_atom = cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), dtype)
+    tv_g2s = cute.make_layout((256, 4), stride=(4, 1))
+    frg_g2s = cute.make_rmem_tensor((4,), dtype)
+
+    # --- Prologue：K 条 0 装入 buffer 0
+    g_a0 = cute.local_tile(mX, (64, 16), (bidx, 0))
+    slab_a0 = cute.slice_(sA, (0, None, None))
+    t_g_a0 = cute.composition(g_a0, tv_g2s)
+    t_s_a0 = cute.composition(slab_a0, tv_g2s)
+    cute.copy(copy_atom, t_g_a0[(tidx, None)], frg_g2s)
+    cute.copy(copy_atom, frg_g2s, t_s_a0[(tidx, None)])
+
+    g_b0 = cute.local_tile(mWt, (16, 64), (0, bidy))
+    slab_b0 = cute.slice_(sB, (0, None, None))
+    t_g_b0 = cute.composition(g_b0, tv_g2s)
+    t_s_b0 = cute.composition(slab_b0, tv_g2s)
+    cute.copy(copy_atom, t_g_b0[(tidx, None)], frg_g2s)
+    cute.copy(copy_atom, frg_g2s, t_s_b0[(tidx, None)])
+
+    cute.arch.sync_threads()
+
+    for k_tile in range(0, kdim, 16):
+        kn = k_tile // 16
+        if cute.elem_less(k_tile + 16, kdim):
+            kb_n = kn + 1
+            wp = 1 - (kn % 2)
+            slab_aw = cute.slice_(sA, (wp, None, None))
+            slab_bw = cute.slice_(sB, (wp, None, None))
+            g_an = cute.local_tile(mX, (64, 16), (bidx, kb_n))
+            g_bn = cute.local_tile(mWt, (16, 64), (kb_n, bidy))
+            t_g_an = cute.composition(g_an, tv_g2s)
+            t_s_aw = cute.composition(slab_aw, tv_g2s)
+            cute.copy(copy_atom, t_g_an[(tidx, None)], frg_g2s)
+            cute.copy(copy_atom, frg_g2s, t_s_aw[(tidx, None)])
+            t_g_bn = cute.composition(g_bn, tv_g2s)
+            t_s_bw = cute.composition(slab_bw, tv_g2s)
+            cute.copy(copy_atom, t_g_bn[(tidx, None)], frg_g2s)
+            cute.copy(copy_atom, frg_g2s, t_s_bw[(tidx, None)])
+            cute.arch.sync_threads()
+
+        rp = kn % 2
+        for kk in range(16):
+            for ii in range(4):
+                for jj in range(4):
+                    frag[ii, jj] = (
+                        frag[ii, jj]
+                        + sA[rp, 4 * ti + ii, kk] * sB[rp, kk, 4 * tj + jj]
+                    )
+
+        if cute.elem_less(k_tile + 16, kdim):
+            cute.arch.sync_threads()
+
+    for ii in range(4):
+        for jj in range(4):
+            gi = bm + 4 * ti + ii
+            gj = bn + 4 * tj + jj
+            mY[gi, gj] = frag[ii, jj] + mB[gj]
+
+
+@cute.kernel
 def linear_naive_kernel(
     mY: cute.Tensor, mX: cute.Tensor, mW: cute.Tensor, mB: cute.Tensor
 ):
@@ -176,6 +278,18 @@ def linear_entry_tiled(mY, mX, mWt, mB):
 
 
 @cute.jit
+def linear_entry_tiled_double_buffer(mY, mX, mWt, mB):
+    m = cute.size(mX, mode=[0])
+    n = cute.size(mY, mode=[1])
+    grid_x = (m + 64 - 1) // 64
+    grid_y = (n + 64 - 1) // 64
+    linear_tiled_kernel_double_buffer(mY, mX, mWt, mB).launch(
+        grid=[grid_x, grid_y, 1],
+        block=[256, 1, 1],
+    )
+
+
+@cute.jit
 def linear_entry_naive(mY, mX, mW, mB):
     threads_per_block = 256
     m = cute.size(mX, mode=[0])
@@ -206,6 +320,12 @@ def main() -> None:
         default="tiled",
         help="tiled: smem 块 GEMM + Wt 布局（默认）；naive: 旧实现",
     )
+    p.add_argument(
+        "--pipeline",
+        choices=("single", "double", "double_cpasync32"),
+        default="single",
+        help="single|double|double_cpasync32（double_cpasync32 当前等同 double；CopyG2S 构图待 DSL）",
+    )
     args = p.parse_args()
 
     if not torch.cuda.is_available():
@@ -224,7 +344,13 @@ def main() -> None:
         x_t = from_dlpack(x_pad).mark_layout_dynamic()
         wt_t = from_dlpack(wt_pad).mark_layout_dynamic()
         b_t = from_dlpack(b_pad).mark_layout_dynamic()
-        entry = linear_entry_tiled
+        if args.pipeline == "double":
+            entry = linear_entry_tiled_double_buffer
+        elif args.pipeline == "double_cpasync32":
+            # 与 double 同内核：CopyG2SOp+当前构图运行结果错误，见模块说明与 linear_tiled_kernel_double_buffer 注释
+            entry = linear_entry_tiled_double_buffer
+        else:
+            entry = linear_entry_tiled
         compile_args = (y_t, x_t, wt_t, b_t)
         run_args = (y_t, x_t, wt_t, b_t)
         y_out = y_pad
@@ -273,8 +399,9 @@ def main() -> None:
             f"cutedsl_ms_per_iter {ms_per_iter:.6f} cutedsl_gflops {gflops:.4f} cutedsl_compile_s {compile_s:.6f}"
         )
     else:
+        pipe = args.pipeline if args.kernel == "tiled" else "-"
         print(
-            f"shape M={m} N={n} K={k}  fp32  kernel={args.kernel}  "
+            f"shape M={m} N={n} K={k}  fp32  kernel={args.kernel}  pipeline={pipe}  "
             f"(tiled uses BM={BM} BN={BN} BK={BK})"
         )
         print(f"compile_s={compile_s:.4f}  ms/iter={ms_per_iter:.6f}  GFLOPS={gflops:.2f}")
