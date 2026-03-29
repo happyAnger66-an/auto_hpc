@@ -7,6 +7,8 @@
 | `cutedsl/` | CuTeDSL **块 tile + smem GEMM**（默认）或 `--kernel naive` 对照 + `benchmark_linear.py` |
 | `cublas/` | CMake + `linear_bench.cu`：`cublasSgemm`（**设备列主序**）+ `cublasSaxpy` 加 bias |
 | `cudnn/` | CMake + `linear_bench.cu`：1×1 卷积实现 matmul + `cudnnAddTensor` 加 bias |
+| `cpasync_microbench/` | 独立 **cp.async**（4B）正确性 + 与同步 kernel 计时的最小 CUDA 程序（4070 用 `sm_89`） |
+| `cuda_cpasync_linear/` | **PyTorch JIT 扩展**：双槽 smem + **16B cp.async** 预取的 tiled Linear，pad/校验与 `cutedsl` 一致；见目录内 `README.md` |
 
 ## 性能指标
 
@@ -21,6 +23,12 @@ cmake --build linear/cublas/build -j
 
 cmake -S linear/cudnn -B linear/cudnn/build -DCMAKE_BUILD_TYPE=Release
 cmake --build linear/cudnn/build -j
+
+cmake -S linear/cpasync_microbench -B linear/cpasync_microbench/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=89
+cmake --build linear/cpasync_microbench/build -j
+./linear/cpasync_microbench/build/cpasync_verify
+
+python3 linear/cuda_cpasync_linear/benchmark_cpasync_linear.py --m 1024 --n 1024 --k 1024
 ```
 
 ## 一键对比
