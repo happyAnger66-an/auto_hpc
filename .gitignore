@@ -10,3 +10,5 @@ dist/
 
 # 可选：本地 CuTeDSL 克隆内的缓存（若放在仓库旁）
 CuTeDSL/__pycache__
+decoder.engine
+decoder.onnx

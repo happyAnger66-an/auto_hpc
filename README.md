@@ -9,6 +9,8 @@
 | `element-wise/` | 逐元素 `C = A + B`（FP32） |
 | `linear/` | `Y = X @ W^T + b`（FP32） |
 | `docs/` | 补充说明（如 Linear 与 CuTeDSL 优化相关笔记） |
+| `llm/` | 最小 decoder-only LLM（PyTorch）、ONNX / TensorRT 导出与对比脚本 |
+| `tests/` | 集成自检（如 `tests/llm/`，见 `tests/README.md`） |
 
 各算子目录内另有 `README.md`，含编译命令与指标定义。
 
