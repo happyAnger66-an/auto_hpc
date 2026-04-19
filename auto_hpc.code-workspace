@@ -1,0 +1,17 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../openpi"
+		},
+		{
+			"path": "../SOL-ExecBench"
+		},
+		{
+			"path": "../hpc_bench"
+		}
+	],
+	"settings": {}
+}

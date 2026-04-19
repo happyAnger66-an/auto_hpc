@@ -1,0 +1,34 @@
+op: fmha
+
+backends:
+  - builtin: pytorch
+  - builtin: triton
+  - builtin: cutedsl
+  # 动态插件示例（按需启用）:
+  # - target: my_pkg.my_backend:MyFmhaBackend
+  #   alias: my_backend
+
+run:
+  warmup: 5
+  iters: 20
+  check: true
+  check_cases: 5
+
+cases:
+  - B: 1
+    H: 4
+    L: 64
+    D: 64
+    dtype: fp16
+    causal: false
+    seed: 0
+    device: cuda
+  - B: 1
+    H: 8
+    L: 128
+    D: 128
+    dtype: fp16
+    causal: true
+    seed: 1
+    device: cuda
+

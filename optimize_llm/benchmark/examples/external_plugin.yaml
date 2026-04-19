@@ -1,0 +1,25 @@
+op: fmha
+
+backends:
+  - builtin: pytorch
+  # 将 target 改为你的外部模块路径:
+  #   <python_module_path>:<class_or_factory_symbol>
+  - target: optimize_llm.benchmark.examples.external_backend_template:ExternalFmhaBackend
+    alias: external_template
+
+run:
+  warmup: 2
+  iters: 10
+  check: true
+  check_cases: 5
+
+cases:
+  - B: 1
+    H: 4
+    L: 64
+    D: 64
+    dtype: fp16
+    causal: false
+    seed: 0
+    device: cuda
+
