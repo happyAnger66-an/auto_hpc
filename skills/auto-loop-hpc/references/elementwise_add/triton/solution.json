@@ -1,0 +1,18 @@
+{
+  "name": "elemadd_triton_v1",
+  "definition": "elemadd_h4096",
+  "author": "auto-loop-hpc",
+  "description": "Triton elementwise add (hidden_size=4096, bf16)",
+  "spec": {
+    "languages": ["triton"],
+    "target_hardware": ["LOCAL"],
+    "entry_point": "kernel.py::run",
+    "destination_passing_style": true,
+    "dependencies": ["torch", "triton"]
+  },
+  "sources": [
+    {
+      "path": "kernel.py"
+    }
+  ]
+}

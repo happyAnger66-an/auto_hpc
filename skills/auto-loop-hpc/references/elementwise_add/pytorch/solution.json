@@ -1,0 +1,18 @@
+{
+  "name": "elemadd_pytorch_v1",
+  "definition": "elemadd_h4096",
+  "author": "auto-loop-hpc",
+  "description": "PyTorch elementwise add (DPS)",
+  "spec": {
+    "languages": ["pytorch"],
+    "target_hardware": ["LOCAL"],
+    "entry_point": "kernel.py::run",
+    "destination_passing_style": true,
+    "dependencies": ["torch"]
+  },
+  "sources": [
+    {
+      "path": "kernel.py"
+    }
+  ]
+}

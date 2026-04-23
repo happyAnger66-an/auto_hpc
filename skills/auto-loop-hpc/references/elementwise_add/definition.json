@@ -1,0 +1,36 @@
+{
+  "name": "elemadd_h4096",
+  "op_type": "elementwise_add",
+  "description": "Element-wise add of two bf16 matrices (reference pattern: no scalar inputs)",
+  "axes": {
+    "batch_size": {
+      "type": "var",
+      "description": "Leading dimension (e.g. batch * seq)"
+    },
+    "hidden_size": {
+      "type": "const",
+      "value": 4096,
+      "description": "Row width"
+    }
+  },
+  "inputs": {
+    "a": {
+      "shape": ["batch_size", "hidden_size"],
+      "dtype": "bfloat16",
+      "description": "First operand"
+    },
+    "b": {
+      "shape": ["batch_size", "hidden_size"],
+      "dtype": "bfloat16",
+      "description": "Second operand"
+    }
+  },
+  "outputs": {
+    "output": {
+      "shape": ["batch_size", "hidden_size"],
+      "dtype": "bfloat16",
+      "description": "a + b"
+    }
+  },
+  "reference": "import torch\n\ndef run(a, b):\n    return (a.to(torch.float32) + b.to(torch.float32)).to(a.dtype)"
+}
